@@ -17,6 +17,9 @@ public class RTXVideoUpscaleExtension : Extension
 {
     public static T2IParamGroup RTXGroup;
 
+    /// <summary>Toggleable group for RTX Video Frame Generation, separate from the upscale group.</summary>
+    public static T2IParamGroup RTXFrameGenGroup;
+
     // Upscale parameters
     public static T2IRegisteredParam<string> RTXUpscaleQuality;
     public static T2IRegisteredParam<string> RTXUpscaleResizeMode;
@@ -106,12 +109,22 @@ public class RTXVideoUpscaleExtension : Extension
     {
         RTXGroup = new(
             Name: "RTX Video Upscale",
-            Description: "Upscale video/images and interpolate frames using NVIDIA RTX Video Super Resolution (VSR) and RTX Video Frame Generation.\n" +
+            Description: "Upscale video/images using NVIDIA RTX Video Super Resolution (VSR).\n" +
                          "Hardware-accelerated by NVIDIA TensorRT and RTX Video Effects SDK.\n" +
-                         "Can be enabled for generation or used via history buttons ('RTX Upscale', 'RTX Interpolate').",
+                         "Can be enabled for generation or used via the 'RTX Upscale' history button.",
             Toggles: true,
             Open: false,
             OrderPriority: 8,
+            IsAdvanced: false
+        );
+        // Separate toggleable group, so frame generation can be enabled without forcing an upscale (and vice versa).
+        RTXFrameGenGroup = new(
+            Name: "RTX Frame Generation",
+            Description: "Interpolate video frames using NVIDIA RTX Video Frame Generation.\n" +
+                         "Can be enabled for video generation or used via the 'RTX Interpolate' history button.",
+            Toggles: true,
+            Open: false,
+            OrderPriority: 8.1,
             IsAdvanced: false
         );
 
@@ -217,13 +230,13 @@ public class RTXVideoUpscaleExtension : Extension
         RTXFrameInterpolation = T2IParamTypes.Register<int>(new T2IParamType(
             Name: "RTX Frame Generation Multiplier",
             Description: "Frame count multiplier for NVIDIA RTX Video Frame Generation.\n" +
-                         "1 = disabled, 2 doubles frame rate (e.g. 16 -> 32 fps), 3 triples it, etc.",
-            Default: "1",
+                         "2 doubles frame rate (e.g. 16 -> 32 fps), 3 triples it, etc. 1 leaves the frames unchanged.",
+            Default: "2",
             Min: 1,
             Max: 16,
             Step: 1,
             ViewType: ParamViewType.SLIDER,
-            Group: RTXGroup,
+            Group: RTXFrameGenGroup,
             OrderPriority: priority++,
             FeatureFlag: "rtx_video_frame_gen",
             DoNotPreview: true
@@ -234,7 +247,7 @@ public class RTXVideoUpscaleExtension : Extension
             Description: "When enabled, multiplies video FPS with the frame multiplier to preserve original duration and achieve maximum smoothness.\n" +
                          "When disabled, plays at original FPS in slow-motion.",
             Default: "true",
-            Group: RTXGroup,
+            Group: RTXFrameGenGroup,
             OrderPriority: priority++,
             FeatureFlag: "rtx_video_frame_gen",
             DoNotPreview: true
@@ -245,7 +258,7 @@ public class RTXVideoUpscaleExtension : Extension
             Description: "Quality and performance mode for RTX Frame Generation.\n" +
                          "'MEDIUM' (recommended) offers balanced motion clarity and high tensor throughput; 'HIGH' maximizes detail.",
             Default: "MEDIUM",
-            Group: RTXGroup,
+            Group: RTXFrameGenGroup,
             OrderPriority: priority++,
             FeatureFlag: "rtx_video_frame_gen",
             DoNotPreview: true,
@@ -256,7 +269,7 @@ public class RTXVideoUpscaleExtension : Extension
             Name: "RTX Frame Gen Shot Detection",
             Description: "Automatically detects hard scene cuts to prevent unwanted frame morphing across shot transitions.",
             Default: "true",
-            Group: RTXGroup,
+            Group: RTXFrameGenGroup,
             OrderPriority: priority++,
             FeatureFlag: "rtx_video_frame_gen",
             DoNotPreview: true,
@@ -267,7 +280,7 @@ public class RTXVideoUpscaleExtension : Extension
             Name: "RTX Frame Gen Encoding",
             Description: "Pixel encoding for frame generation. '8-bit RGB' is standard; '10-bit RGB (RGB10A2)' provides higher color fidelity.",
             Default: "8-bit RGB",
-            Group: RTXGroup,
+            Group: RTXFrameGenGroup,
             OrderPriority: priority++,
             FeatureFlag: "rtx_video_frame_gen",
             DoNotPreview: true,
@@ -304,38 +317,45 @@ public class RTXVideoUpscaleExtension : Extension
         ));
     }
 
+    /// <summary>
+    /// Resolves a client-supplied 'Output/...' or 'View/(user)/...' history path to a file inside the requesting user's own output root.
+    /// Anything else (absolute paths, '~/', traversal out of the root) is rejected, as the value arrives straight from the API.
+    /// </summary>
     private static string ResolveVideoPath(User user, string videoFile)
     {
-        if (videoFile.StartsWith("~/"))
+        if (user is null)
         {
-            videoFile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + videoFile[1..];
+            throw new SwarmUserErrorException("RTX Video: processing a history video requires a user session.");
         }
-
-        if (user is not null)
+        // Normalize separators so the prefix checks below also work on Windows paths.
+        videoFile = videoFile.Replace('\\', '/');
+        string relativePath = null;
+        if (videoFile.StartsWith("Output/"))
         {
-            string relativePath = null;
-            if (videoFile.StartsWith("Output/"))
+            relativePath = videoFile["Output/".Length..];
+        }
+        else if (videoFile.StartsWith("View/"))
+        {
+            string afterView = videoFile["View/".Length..];
+            int slashIndex = afterView.IndexOf('/');
+            if (slashIndex > 0)
             {
-                relativePath = videoFile["Output/".Length..];
-            }
-            else if (videoFile.StartsWith("View/"))
-            {
-                string afterView = videoFile["View/".Length..];
-                int slashIndex = afterView.IndexOf('/');
-                if (slashIndex > 0)
-                {
-                    relativePath = afterView[(slashIndex + 1)..];
-                }
-            }
-
-            if (relativePath is not null)
-            {
-                string root = Utilities.CombinePathWithAbsolute(Environment.CurrentDirectory, user.OutputDirectory);
-                videoFile = UserImageHistoryHelper.GetRealPathFor(user, $"{root}/{relativePath}", root: root);
+                relativePath = afterView[(slashIndex + 1)..];
             }
         }
-
-        return videoFile;
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            throw new SwarmUserErrorException("RTX Video: only videos from your own output history can be processed.");
+        }
+        string root = Path.GetFullPath(Utilities.CombinePathWithAbsolute(Environment.CurrentDirectory, user.OutputDirectory));
+        string full = Path.GetFullPath(Utilities.CombinePathWithAbsolute(root, relativePath));
+        if (!full.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar))
+        {
+            Logs.Warning($"RTX Video: rejected path traversal attempt '{videoFile}' outside of user output root.");
+            throw new SwarmUserErrorException("RTX Video: only videos from your own output history can be processed.");
+        }
+        // GetRealPathFor deliberately remaps core shared special folders, same as the core history routes.
+        return UserImageHistoryHelper.GetRealPathFor(user, full, root: root);
     }
 
     private static (string container, string codec) GetVideoFormat(WorkflowGenerator g)
@@ -476,11 +496,11 @@ public class RTXVideoUpscaleExtension : Extension
             JToken finalFps = videoFps;
             if (adjustFps && multiplier > 1)
             {
-                string multNode = g.CreateNode("CM_FloatBinaryOperation", new JObject()
+                // Core ComfyUI math node (comfy_extras/nodes_math.py), so no third-party math pack is needed. 'values' is an autogrow input.
+                string multNode = g.CreateNode("ComfyMathExpression", new JObject()
                 {
-                    ["op"] = "Mul",
-                    ["a"] = videoFps,
-                    ["b"] = (double)multiplier
+                    ["expression"] = $"a * {multiplier}",
+                    ["values.a"] = videoFps
                 });
                 finalFps = new JArray() { multNode, 0 };
             }
@@ -624,8 +644,8 @@ public class RTXVideoUpscaleExtension : Extension
             return;
         }
 
-        int multiplier = g.UserInput.Get(RTXFrameInterpolation, 1);
-        if (multiplier < 2)
+        // The multiplier is only present when the 'RTX Frame Generation' group is enabled.
+        if (!g.UserInput.TryGet(RTXFrameInterpolation, out int multiplier) || multiplier < 2)
         {
             return;
         }
