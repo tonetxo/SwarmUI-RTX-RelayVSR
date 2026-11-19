@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <AssemblyName>RTXVideoUpscaleExtension</AssemblyName>
+    <AssemblyName>VideoUpscaleExtension</AssemblyName>
     <TargetFramework>net8.0</TargetFramework>
   </PropertyGroup>
 
